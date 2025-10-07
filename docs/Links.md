@@ -7,4 +7,4 @@
 - RebirthHandler.server.lua  
   https://raw.githubusercontent.com/<you>/<repo>/main/ServerScriptService/RebirthHandler.server.lua
 - Rarites.lua
-  https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ReplicatedStorage/Modules/Rarities.lua
+  https://raw.githubusercontent.com/<you>/<repo>/main/ReplicatedStorage/Modules/Rarities.lua
