@@ -5,4 +5,17 @@ https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/Repl
 https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ReplicatedStorage/Modules/Settings.lua
 
 ////////// ReplicatedStorage.Net \\\\\\\\\\
-more links to come here
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ReplicatedStorage/Net/NetClient.lua
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ReplicatedStorage/Net/RemoteManager.lua
+
+////////// ServerScriptService.Modules \\\\\\\\\\
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Modules/ArenaCatalog.lua
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Modules/PetService.lua
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Modules/PlayerData.lua
+
+////////// ServerScriptService.Systems \\\\\\\\\\
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Systems/ArenaService.server
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Systems/Data.server
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Systems/PlotServer.server
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Systems/RebirthService.server
+https://raw.githubusercontent.com/Pacoisthebest/Battle-Pets/refs/heads/main/ServerScriptService/Systems/RemoteRegistry.server
