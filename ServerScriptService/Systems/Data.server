@@ -1,0 +1,70 @@
+-- Leaderstats.server.lua
+local Players = game:GetService("Players")
+
+local PlayerData = require(game.ServerScriptService.Modules.PlayerData)
+local Settings = require(game.ServerScriptService.Config.Settings)
+
+local function createLeaderstats(player, data)
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local cash = Instance.new("IntValue")
+	cash.Name = "Cash"
+	cash.Value = data.Cash or 0
+	cash.Parent = leaderstats
+
+	local xp = Instance.new("NumberValue")
+	xp.Name = "XP Multiplier"
+	xp.Value = data.XPMultiplier or 1
+	xp.Parent = leaderstats
+	
+	local rebirths = Instance.new("NumberValue")
+	rebirths.Name = "Rebirths"
+	rebirths.Value = data.Rebirths or 0
+	rebirths.Parent = leaderstats
+	
+	local plotUpgrades = Instance.new("NumberValue")
+	plotUpgrades.Name = "Plot Upgrades"
+	plotUpgrades.Value = data.PlotUpgrades or 0
+	plotUpgrades.Parent = leaderstats
+
+	-- If these change from code, mirror them back into PlayerData and mark dirty.
+	cash.Changed:Connect(function()
+		PlayerData.SetCash(player, cash.Value)
+	end)
+
+	xp.Changed:Connect(function()
+		PlayerData.SetXPMultiplier(player, xp.Value)
+	end)
+	
+	rebirths.Changed:Connect(function()
+		PlayerData.SetRebirths(player, rebirths.Value)
+	end)
+	plotUpgrades.Changed:Connect(function()
+		PlayerData.SetPlotUpgrades(player, plotUpgrades.Value)
+	end)
+end
+
+local function onPlayerAdded(player)
+	local data = PlayerData.LoadAsync(player)
+	createLeaderstats(player, data)
+end
+
+local function onPlayerRemoving(player)
+	-- Save and release
+	PlayerData.SaveAsync(player)
+	PlayerData.Release(player)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+
+-- Handle Studio test where players already exist
+for _, p in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, p)
+end
+
+if Settings.Debug then
+	-- print("[Leaderstats] Ready. Using DataVersion =", Settings.DataVersion)
+end
