@@ -1,0 +1,32 @@
+-- ServerScriptService/Net/RemoteRegistry.server.lua
+-- Define all your remotes, schemas, limits, and handlers here.
+
+local Players       = game:GetService("Players")
+local ServerStorage = game:GetService("ServerStorage")
+
+local RemoteManager = require(game.ReplicatedStorage.Net:WaitForChild("RemoteManager"))
+local Net = RemoteManager.new()
+
+----------------------------------------------------------------
+-- Example middlewares
+----------------------------------------------------------------
+local function mustBeAlive(player)
+	local char = player.Character
+	if not char then return false, "no character" end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	return hum and hum.Health > 0, "dead"
+end
+
+local function maxDistanceFrom(partName, maxDist)
+	return function(player, payload)
+		local char = player.Character
+		if not char then return false, "no char" end
+		local root = char:FindFirstChild("HumanoidRootPart")
+		local part = workspace:FindFirstChild(partName, true)
+		if not (root and part) then return false, "missing parts" end
+		return (root.Position - part.Position).Magnitude <= maxDist, "too far"
+	end
+end
+
+
+_G.Net = Net
