@@ -1,0 +1,182 @@
+-- ServerScriptService/Systems/RebirthService.server.lua
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+
+-- Remotes
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes") or Instance.new("Folder")
+Remotes.Name = "Remotes"
+Remotes.Parent = ReplicatedStorage
+
+local RE_RebirthRequest = Remotes:FindFirstChild("Rebirth_Request") or Instance.new("RemoteEvent")
+RE_RebirthRequest.Name = "Rebirth_Request"
+RE_RebirthRequest.Parent = Remotes
+
+local RE_RebirthResult = Remotes:FindFirstChild("Rebirth_Result") or Instance.new("RemoteEvent")
+RE_RebirthResult.Name = "Rebirth_Result"
+RE_RebirthResult.Parent = Remotes
+
+-- Modules
+local Rebirths     = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Rebirths"))
+local PlayerData   = require(game.ServerScriptService.Modules.PlayerData)
+local PetCatalog   = require(ReplicatedStorage.Modules.PetCatalog)
+
+-- (Optional) simple notify bus if you already use it
+local NotifyBus = ReplicatedStorage:FindFirstChild("Net")
+	and ReplicatedStorage.Net:FindFirstChild("v1")
+	and ReplicatedStorage.Net.v1:FindFirstChild("NotificationsC")
+
+-- Helper: send result back + optional on-screen notify
+local function sendResult(player: Player, ok: boolean, msg: string)
+	if RE_RebirthResult then
+		RE_RebirthResult:FireClient(player, { ok = ok, message = msg })
+	end
+	if NotifyBus then
+		local color = ok and "success" or "error"
+		local soundId = ok and "Rebirth" or "Error"
+		NotifyBus:FireClient(player, { text = msg, color = color, sound = soundId })
+	end
+end
+
+-- Get which stage the player is attempting (current Rebirths + 1)
+local function getStageIdForPlayer(player: Player): string
+	local ls = player:FindFirstChild("leaderstats")
+	local rb = ls and ls:FindFirstChild("Rebirths")
+	local current = (rb and tonumber(rb.Value)) or 0
+	return tostring(current + 1)
+end
+
+-- Check requirements against PlayerData (money + pet counts)
+local function hasRequirements(player: Player, stageDef: table)
+	if not stageDef or not stageDef.Requirements then return false, "No requirements defined." end
+	local req = stageDef.Requirements
+	local data = PlayerData.Get(player) or PlayerData.LoadAsync(player)
+	if not data then return false, "No player data." end
+
+	-- Money minimum
+	if req.Money and (tonumber(data.Cash) or 0) < tonumber(req.Money) then
+		return false, ("Requires at least $%s cash."):format(tostring(req.Money))
+	end
+
+	-- Pet requirements (total owned count)
+	if req.Pets then
+		data.Pets = data.Pets or {}
+		for petId, needQty in pairs(req.Pets) do
+			local ownedQty = tonumber(data.Pets[petId]) or 0
+			if ownedQty < (tonumber(needQty) or 0) then
+				local def = PetCatalog.Get(petId)
+				return false, ("Requires %dx %s."):format(needQty, (def and def.Name) or petId)
+			end
+		end
+	end
+
+	return true
+end
+
+-- Apply rewards to PlayerData/leaderstats
+local function grantRewards(player: Player, stageDef: table)
+	if not stageDef or not stageDef.Rewards then return end
+	local rew = stageDef.Rewards
+	local data = PlayerData.Get(player) or PlayerData.LoadAsync(player)
+	if not data then return end
+
+	-- XP Multiplier (additive as requested)
+	if rew.XPMultiplier then
+		local ls = player:FindFirstChild("leaderstats")
+		local xpStat = ls and ls:FindFirstChild("XP Multiplier")
+		if xpStat then
+			xpStat.Value = (tonumber(xpStat.Value) or 0) + tonumber(rew.XPMultiplier)
+			PlayerData.SetXPMultiplier(player, xpStat.Value)
+		end
+	end
+
+	-- Money reward
+	if rew.Money then
+		PlayerData.AddCash(player, tonumber(rew.Money) or 0)
+		local ls = player:FindFirstChild("leaderstats")
+		local cash = ls and ls:FindFirstChild("Cash")
+		if cash then cash.Value = PlayerData.Get(player).Cash end
+	end
+
+	-- Plot upgrade → leaderstat "PlotUpgrades"
+	if rew.PlotUpgrade then
+		local valueToAdd = 0
+		if type(rew.PlotUpgrade) == "table" then
+			-- ex: { Slots = 1 } — add whatever you like; for now count Slots if present
+			if rew.PlotUpgrade.Slots then
+				valueToAdd += tonumber(rew.PlotUpgrade.Slots) or 0
+			end
+		elseif type(rew.PlotUpgrade) == "number" then
+			valueToAdd = rew.PlotUpgrade
+		end
+
+		local ls = player:FindFirstChild("leaderstats")
+		if ls then
+			local pu = ls:FindFirstChild("Plot Upgrades")
+			pu.Value = pu.Value + valueToAdd
+		end
+	end
+end
+
+-- Consume pets & reset money (but keep all other pets besides those spent)
+local function consumeRequirementsAndReset(player: Player, stageDef: table)
+	local data = PlayerData.Get(player) or PlayerData.LoadAsync(player)
+	if not data then return end
+
+	-- Remove required pets from inventory
+	if stageDef.Requirements and stageDef.Requirements.Pets then
+		data.Pets = data.Pets or {}
+		for petId, needQty in pairs(stageDef.Requirements.Pets) do
+			local cur = tonumber(data.Pets[petId]) or 0
+			local newQty = math.max(0, cur - (tonumber(needQty) or 0))
+			data.Pets[petId] = newQty
+		end
+	end
+
+	-- Reset money to 0
+	PlayerData.SetCash(player, 0)
+	local ls = player:FindFirstChild("leaderstats")
+	local cash = ls and ls:FindFirstChild("Cash")
+	if cash then cash.Value = 0 end
+end
+
+-- Main handler
+RE_RebirthRequest.OnServerEvent:Connect(function(player: Player)
+	local stageId = getStageIdForPlayer(player)
+	local stage = Rebirths.Get(stageId)
+
+	if not stage then
+		sendResult(player, false, "No further rebirths available.")
+		return
+	end
+
+	-- Validate requirements
+	local ok, why = hasRequirements(player, stage)
+	if not ok then
+		sendResult(player, false, why or "Requirements not met.")
+		return
+	end
+
+	-- Spend requirements + reset money
+	consumeRequirementsAndReset(player, stage)
+
+	-- Increment Rebirths
+	local ls = player:FindFirstChild("leaderstats")
+	if ls then
+		local rb = ls:FindFirstChild("Rebirths")
+		if not rb then
+			rb = Instance.new("IntValue")
+			rb.Name = "Rebirths"
+			rb.Value = 0
+			rb.Parent = ls
+		end
+		rb.Value = rb.Value + 1
+		PlayerData.SetRebirths(player, rb.Value)
+	end
+
+	-- Rewards
+	grantRewards(player, stage)
+
+	-- Save & ack
+	PlayerData.SaveAsync(player)
+	sendResult(player, true, ("Rebirthed to Stage %s!"):format(stageId))
+end)
