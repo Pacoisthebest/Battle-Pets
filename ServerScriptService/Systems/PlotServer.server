@@ -1,0 +1,252 @@
+-- PlotManager.server.lua
+-- Assigns players to unique plots and spawns them on the plot's Spawn part.
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local PLOTS_FOLDER = workspace:WaitForChild("Plots")
+
+local PetService = require(game.ServerScriptService.Modules.PetService)
+
+-- Internal state: who owns which plot
+-- map: player -> plotFolder
+local playerToPlot = {}
+-- reverse map: plotFolder -> player
+local plotToPlayer = {}
+
+-- Utility: get all plot folders that have a child Part named "Spawn"
+local function getAllPlots()
+	local plots = {}
+	for _, child in ipairs(PLOTS_FOLDER:GetChildren()) do
+		if child:IsA("Folder") and child:FindFirstChild("Spawn") and child.Spawn:IsA("BasePart") then
+			table.insert(plots, child)
+		end
+	end
+	return plots
+end
+
+-- Utility: make a list of unowned plots
+local function getFreePlots()
+	local free = {}
+	for _, plot in ipairs(getAllPlots()) do
+		if not plotToPlayer[plot] then
+			table.insert(free, plot)
+		end
+	end
+	return free
+end
+
+local function updatePlotIfHasOwner(plotFolder)
+	local ownerModel = plotFolder:FindFirstChild("Owner")
+	if not ownerModel then return end
+
+	local hasOwner = plotFolder:GetAttribute("Owner") ~= nil
+	for _, part in ipairs(ownerModel:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Transparency = hasOwner and 0 or 1
+			part.CanCollide = hasOwner
+			part.CanQuery = hasOwner
+			part.CanTouch = hasOwner
+		elseif part:IsA("SurfaceGui") then
+			part.Enabled = hasOwner
+		end
+	end
+	
+	local slots = plotFolder:FindFirstChild("Slots")
+	if slots then
+		for _, slotModel in ipairs(slots:GetChildren()) do
+			if slotModel:IsA("Model") then
+				local decorations = slotModel:FindFirstChild("Decorations")
+				if decorations then
+					local stand = decorations:FindFirstChild("Stand")
+					if stand then
+						local holder = stand:FindFirstChild("Holder")
+						if holder and holder:IsA("BasePart") then
+							holder.Color = hasOwner and Color3.fromRGB(129, 129, 129) or Color3.fromRGB(91, 91, 91)
+						end
+					end
+				end
+
+				-- Button -> Claim
+				local button = slotModel:FindFirstChild("Button")
+				if button then
+					local claim = button:FindFirstChild("Claim")
+					if claim and claim:IsA("BasePart") then
+						claim.Color = hasOwner and Color3.fromRGB(85, 147, 37) or Color3.fromRGB(116, 116, 116)
+					end
+				end
+			end
+		end
+	end
+end
+
+for _, plot in ipairs(PLOTS_FOLDER:GetChildren()) do
+	if plot:IsA("Folder") then
+		plot:GetAttributeChangedSignal("Owner"):Connect(function()
+			updatePlotIfHasOwner(plot)
+		end)
+		updatePlotIfHasOwner(plot)
+	end
+end
+
+PLOTS_FOLDER.ChildAdded:Connect(function(child)
+	if child:IsA("Folder") then
+		child:GetAttributeChangedSignal("Owner"):Connect(function()
+			updatePlotIfHasOwner(child)
+		end)
+		updatePlotIfHasOwner(child)
+	end
+end)
+
+-- Assign a random free plot to a player. Returns the plot or nil if none.
+local function assignRandomPlot(player)
+	local free = getFreePlots()
+	if #free == 0 then
+		return nil
+	end
+	local idx = math.random(1, #free)
+	local plot = free[idx]
+	playerToPlot[player] = plot
+	plotToPlayer[plot] = player
+
+	-- (Optional) annotate for easy debugging/UX
+	player:SetAttribute("PlotId", plot.Name)
+	if not plot:GetAttribute("Owner") then
+		plot:SetAttribute("Owner", player.UserId)
+	else
+		plot:SetAttribute("Owner", player.UserId)
+	end
+	
+	updatePlotIfHasOwner(plot)
+
+	return plot
+end
+
+local function releasePlot(player)
+	local plot = playerToPlot[player]
+	if plot then
+		pcall(function()
+			PetService.ResetPlot(plot)
+		end)
+
+		plotToPlayer[plot] = nil
+		playerToPlot[player] = nil
+		plot:SetAttribute("Owner", nil)
+		updatePlotIfHasOwner(plot)
+	end
+end
+
+-- Teleport/position the character to the plot's Spawn part
+local function moveCharacterToPlotSpawn(player, character)
+	local plot = playerToPlot[player]
+	if not plot then return end
+
+	local spawnPart = plot:FindFirstChild("Spawn")
+	if not (spawnPart and spawnPart:IsA("BasePart")) then return end
+
+	-- Ensure character exists and has a HRP
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if not (hrp and humanoid) then return end
+
+	-- Small upward offset to avoid clipping
+	local offset = Vector3.new(0, 5, 0)
+	local targetCFrame = spawnPart.CFrame + offset
+
+	-- Try to load the character a tick later to ensure parts are ready
+	-- Use SetPrimaryPartCFrame when possible; fallback to setting HRP directly.
+	character:MoveTo(targetCFrame.Position)
+	-- Face same orientation as the Spawn part:
+	hrp.CFrame = CFrame.new(targetCFrame.Position) * CFrame.Angles(0, select(2, spawnPart.CFrame:ToOrientation()), 0)
+end
+
+local function onPlayerAdded(player)
+	-- local helpers are fine nested here
+	local function printPlotStatus()
+		print("----- Plot Ownership Status -----")
+		for i = 1, 6 do
+			local plotFolder = PLOTS_FOLDER:FindFirstChild(tostring(i))
+			if plotFolder then
+				local owner = plotToPlayer[plotFolder]
+				if owner then
+					print("Plot " .. i .. " → " .. owner.Name)
+				else
+					print("Plot " .. i .. " → Free")
+				end
+			else
+				print("Plot " .. i .. " → (Missing in Workspace.Plots!)")
+			end
+		end
+		print("---------------------------------")
+	end
+
+	-- Give them a plot (or keep nil if none left)
+	local assignedPlot = assignRandomPlot(player)
+
+	-- ALWAYS print on join
+	print(player.Name .. " joined the game!")
+	printPlotStatus()
+
+	-- Character spawns
+	player.CharacterAdded:Connect(function(character)
+		if player:GetAttribute("ArenaActive") then
+			return
+		end
+		if not playerToPlot[player] then
+			assignedPlot = assignRandomPlot(player)
+			print("[Reassign] " .. player.Name .. " plot → " .. (assignedPlot and assignedPlot.Name or "nil"))
+			printPlotStatus()
+		end
+
+		if playerToPlot[player] then
+			-- Ensure character is fully loaded before moving (HumanoidRootPart available)
+			if not character:FindFirstChild("HumanoidRootPart") then
+				character.ChildAdded:Connect(function(child)
+					if child.Name == "HumanoidRootPart" then
+						moveCharacterToPlotSpawn(player, character)
+					end
+				end)
+			else
+				moveCharacterToPlotSpawn(player, character)
+			end
+		else
+			warn(string.format("[PlotManager] No plots free for %s. They will use default spawn.", player.Name))
+		end
+	end)
+end
+
+local function onPlayerRemoving(player)
+	local function printPlotStatus()
+		print("----- Plot Ownership Status -----")
+		for i = 1, 6 do
+			local plotFolder = PLOTS_FOLDER:FindFirstChild(tostring(i))
+			if plotFolder then
+				local owner = plotToPlayer[plotFolder]
+				if owner then
+					print("Plot " .. i .. " → " .. owner.Name)
+				else
+					print("Plot " .. i .. " → Free")
+				end
+			else
+				print("Plot " .. i .. " → (Missing in Workspace.Plots!)")
+			end
+		end
+		print("---------------------------------")
+	end
+	
+	pcall(function()
+		PetService.ReleasePlayer(player)
+	end)
+
+	releasePlot(player)
+	printPlotStatus()
+end
+
+-- Connect signals
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+
+-- In case studio tests with players already present (Play Solo re-entry)
+for _, p in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, p)
+end
