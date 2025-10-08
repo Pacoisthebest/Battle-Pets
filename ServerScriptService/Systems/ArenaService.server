@@ -1,0 +1,222 @@
+-- ServerScriptService/Systems/ArenaService.server.lua
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local RemoteManager = require(ReplicatedStorage.Net.RemoteManager)
+local Net       = _G.Net or RemoteManager.new()
+local ClientBus = Net:GetEvent("ArenaC")             
+
+-- (Server-only) catalogs / data
+local PlayerData   = require(game.ServerScriptService.Modules.PlayerData)
+local PetCatalog   = require(ReplicatedStorage.Modules.PetCatalog)
+
+-- ===== Weighted pet selection for rewards =====
+local function buildWeightedPool()
+	local pool = {}
+	for id, def in pairs(PetCatalog.All()) do
+		if type(def) == "table" and tonumber(def.Chance) and (def.Chance > 0) then
+			table.insert(pool, { id = id, weight = def.Chance })
+		end
+	end
+	return pool
+end
+
+local function choosePetId(pool)
+	local total = 0
+	for _, e in ipairs(pool) do total += e.weight end
+	if total <= 0 then return nil end
+	local r, acc = math.random() * total, 0
+	for _, e in ipairs(pool) do
+		acc += e.weight
+		if r <= acc then return e.id end
+	end
+	return pool[#pool].id
+end
+
+-- ===== Workspace helpers =====
+local function getArenaPlayersFolder()
+	local main = workspace:FindFirstChild("Main")
+	if not main then return nil end
+	local gameplay = main:FindFirstChild("Gameplay")
+	if not gameplay then return nil end
+	return gameplay:FindFirstChild("Players")
+end
+
+local function getRandomTeleportPart()
+	local main = workspace:FindFirstChild("Main")
+	if not main then return nil end
+	local gp = main:FindFirstChild("Gameplay")
+	if not gp then return nil end
+	local tps = gp:FindFirstChild("Teleports")
+	if not tps then return nil end
+
+	local parts = {}
+	for _, d in ipairs(tps:GetDescendants()) do
+		if d:IsA("BasePart") and d.Name == "TeleportPart" then
+			table.insert(parts, d)
+		end
+	end
+	if #parts == 0 then return nil end
+	return parts[math.random(1, #parts)]
+end
+
+-- ===== Morph player into PetTemplate =====
+local function morphPlayerToTemplate(player, petId, spawnPart)
+	-- find template
+	local rs = game:GetService("ReplicatedStorage")
+	local template = rs:WaitForChild("Assets"):WaitForChild("Templates"):FindFirstChild("PetTemplate")
+	if not (template and template:IsA("Model")) then
+		warn("[Arena] PetTemplate missing under ReplicatedStorage/Assets/Templates")
+		return
+	end
+
+	-- clone + sanity
+	local clone = template:Clone()
+	clone.Name = player.Name
+
+	local hum = clone:FindFirstChildOfClass("Humanoid")
+	local hrp = clone:FindFirstChild("HumanoidRootPart")
+	if not (hum and hrp and hrp:IsA("BasePart")) then
+		warn("[Arena] PetTemplate missing Humanoid or HumanoidRootPart")
+		clone:Destroy()
+		return
+	end
+
+	-- billboard text
+	local billboard = hrp:FindFirstChildOfClass("BillboardGui")
+	if billboard then
+		local tlName   = billboard:FindFirstChild("PlayerName")
+		local tlType   = billboard:FindFirstChild("PetType")
+		local tlPoints = billboard:FindFirstChild("PlayerAmount")
+		if tlName and tlName:IsA("TextLabel") then tlName.Text = player.Name end
+		local def = PetCatalog.Get(petId)
+		if tlType and tlType:IsA("TextLabel") then tlType.Text = (def and def.Name) or petId end
+		if tlPoints and tlPoints:IsA("TextLabel") then
+			tlPoints.Text = tostring(player:GetAttribute("ArenaPoints") or 0)
+			player:GetAttributeChangedSignal("ArenaPoints"):Connect(function()
+				tlPoints.Text = tostring(player:GetAttribute("ArenaPoints") or 0)
+			end)
+		end
+	end
+
+	-- position & parent
+	local dest = getArenaPlayersFolder() or workspace
+	clone.Parent = dest
+	clone.PrimaryPart = hrp
+	hrp.Anchored = false
+	pcall(function() hrp:SetNetworkOwner(player) end)
+
+	local targetCFrame = spawnPart and (spawnPart.CFrame + Vector3.new(0, 3, 0)) or CFrame.new(0, 10, 0)
+	clone:PivotTo(targetCFrame)
+
+	-- wake humanoid
+	local humanoid = clone:FindFirstChildOfClass("Humanoid")
+	if humanoid then
+		humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+	end
+
+	-- swap character
+	local oldChar = player.Character
+	player.Character = clone
+	if oldChar and oldChar.Parent then oldChar:Destroy() end
+
+	-- 🔔 tell client to retarget camera
+	ClientBus:FireClient(player, { op = "newCharacter" })
+end
+
+-- ===== Routes =====
+
+-- Confirm pet selection
+Net:RegisterEvent("Arena/Confirm", function(player, payload)
+	-- payload = { petId = "Cat" }
+	if type(payload) ~= "table" then return end
+	local petId = tostring(payload.petId or "")
+
+	local def = PetCatalog.Get(petId)
+	if not def then
+		warn(("[Arena] %s tried to confirm unknown petId '%s'"):format(player.Name, tostring(petId)))
+		return
+	end
+
+	local data = PlayerData.Get(player) or PlayerData.LoadAsync(player)
+	if not data then return end
+	data.Pets = data.Pets or {}
+	if (data.Pets[petId] or 0) <= 0 then
+		warn(("[Arena] %s tried to confirm pet '%s' they don't own"):format(player.Name, petId))
+		return
+	end
+
+	-- mark arena state
+	player:SetAttribute("ArenaActive", true)
+	player:SetAttribute("ArenaPetId", petId)
+	player:SetAttribute("ArenaPoints", player:GetAttribute("ArenaPoints") or 0)
+
+	-- choose a spawn
+	local tp = getRandomTeleportPart()
+	if not tp then
+		warn("[Arena] No TeleportPart found under Workspace.Main.Gameplay.Teleports")
+		return
+	end
+
+	-- morph
+	morphPlayerToTemplate(player, petId, tp)
+end, {
+	cooldown = 0.75, rate = 3, burst = 3, maxPayloadBytes = 120,
+	schema = { kind = "table", keys = {
+		petId = { kind = "string", min = 1, max = 64 },
+	}}
+})
+
+-- Exit arena & grant rewards
+Net:RegisterEvent("Arena/RequestExit", function(player, _)
+	if not player:GetAttribute("ArenaActive") then
+		return
+	end
+
+	local points = player:GetAttribute("ArenaPoints") or 0
+	local levels = math.floor(points / 1000)
+
+	-- reset state + restore character
+	player:SetAttribute("ArenaActive", false)
+	player:SetAttribute("ArenaPoints", 0)
+	player:LoadCharacter()
+
+	-- no rewards -> done
+	if levels <= 0 then return end
+
+	-- choose rewards (one per level)
+	local rewards = {}
+	local pool = buildWeightedPool()
+	if #pool > 0 then
+		local data = PlayerData.Get(player) or PlayerData.LoadAsync(player)
+		if data then
+			data.Pets = data.Pets or {}
+			for i = 1, levels do
+				local petId = choosePetId(pool)
+				if petId then
+					table.insert(rewards, petId)
+					data.Pets[petId] = (data.Pets[petId] or 0) + 1
+				end
+			end
+			PlayerData.SaveAsync(player)
+		end
+	end
+
+	-- send rewards to client
+	if #rewards > 0 then
+		local items = {}
+		for _, petId in ipairs(rewards) do
+			local def = PetCatalog.Get(petId)
+			table.insert(items, {
+				id     = petId,
+				Name   = def and def.Name   or petId,
+				Rarity = def and def.Rarity or "Common",
+				Image  = def and def.Image  or "",
+			})
+		end
+		ClientBus:FireClient(player, { op = "rewards", items = items })
+	end
+end, {
+	cooldown = 0.5, rate = 3, burst = 3, maxPayloadBytes = 32,
+})
